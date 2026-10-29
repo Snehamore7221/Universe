@@ -107,3 +107,84 @@ export const MODULES = [
     ],
   },
 ];
+
+
+export const STUDENT_PROFILE = {
+  name: 'Aarya Sharma',
+  year: 'Third Year',
+  branch: 'Computer Engineering',
+  skills: ['C++', 'DSA', 'React', 'SQL'],
+  interests: ['Software Engineering', 'FinTech'],
+  careerGoal: 'Software Development Engineer',
+};
+
+export const PLACEMENT_TASKS = [
+  { id: 'task-1', title: 'Practice array and string problems', category: 'DSA', completed: true },
+  { id: 'task-2', title: 'Revise OOP concepts', category: 'Core CS', completed: true },
+  { id: 'task-3', title: 'Study DBMS and SQL', category: 'Core CS', completed: false },
+  { id: 'task-4', title: 'Complete a mock interview', category: 'Interview Prep', completed: false },
+  { id: 'task-5', title: 'Update project descriptions on resume', category: 'Career', completed: false },
+];
+
+export const SAMPLE_MENTORS = [
+  {
+    id: 'mentor-1',
+    name: 'Riya Mehta',
+    year: 'Final Year',
+    skills: ['DSA', 'C++', 'Interview Prep'],
+    domain: 'Software Engineering',
+    description: 'Helps juniors prepare for coding rounds and technical interviews.',
+  },
+  {
+    id: 'mentor-2',
+    name: 'Arjun Shah',
+    year: 'Final Year',
+    skills: ['React', 'Node.js', 'MongoDB'],
+    domain: 'Full-Stack Development',
+    description: 'Guidance on web development projects and portfolio building.',
+  },
+  {
+    id: 'mentor-3',
+    name: 'Neha Patil',
+    year: 'Final Year',
+    skills: ['SQL', 'Python', 'Finance'],
+    domain: 'FinTech',
+    description: 'Explores software careers at the intersection of technology and finance.',
+  },
+];
+
+export const SAMPLE_ACADEMIC_RESOURCES = [
+  {
+    id: 'resource-1',
+    title: 'Data Structures and Algorithms Notes',
+    subject: 'DSA',
+    type: 'Notes',
+    semester: 'Semester 5',
+    url: 'https://www.geeksforgeeks.org/data-structures/',
+  },
+  {
+    id: 'resource-2',
+    title: 'Database Management Systems Reference',
+    subject: 'DBMS',
+    type: 'Notes',
+    semester: 'Semester 5',
+    url: 'https://www.geeksforgeeks.org/dbms/',
+  },
+  {
+    id: 'resource-3',
+    title: 'Operating Systems Previous-Year Practice',
+    subject: 'Operating Systems',
+    type: 'Question Paper',
+    semester: 'Semester 5',
+    url: 'https://www.geeksforgeeks.org/operating-systems/',
+  },
+  {
+    id: 'resource-4',
+    title: 'Technical Interview Preparation',
+    subject: 'Interview Preparation',
+    type: 'Interview Prep',
+    semester: 'Placement',
+    url: 'https://www.geeksforgeeks.org/interview-prep/',
+  },
+];
+
