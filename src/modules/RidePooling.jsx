@@ -11,6 +11,8 @@ import {
   Search,
   PlusCircle,
   UserPlus,
+  Bell,
+  CheckCircle,
 } from 'lucide-react';
 
 import { MODULES } from '../data/seed';
@@ -24,14 +26,19 @@ export default function RidePooling() {
   const [commuteDistance, setCommuteDistance] = useState(12);
   const [coRiders, setCoRiders] = useState(3);
 
-  // Supabase rides state
+  // Supabase state
   const [rides, setRides] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [bookedRideIds, setBookedRideIds] = useState([]);
+  const [currentUserId, setCurrentUserId] = useState(null);
+
   const [loadingRides, setLoadingRides] = useState(true);
   const [publishing, setPublishing] = useState(false);
   const [joiningRideId, setJoiningRideId] = useState(null);
 
   // Status messages
   const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState('success');
 
   // Offer Ride form state
   const [rideFrom, setRideFrom] = useState('');
@@ -42,10 +49,8 @@ export default function RidePooling() {
   // Find Ride search state
   const [searchDestination, setSearchDestination] = useState('');
 
-  // Fetch rides from Supabase
+  // Fetch rides
   async function fetchRides() {
-    setLoadingRides(true);
-
     const { data, error } = await supabase
       .from('rides')
       .select('*')
@@ -54,6 +59,7 @@ export default function RidePooling() {
     if (error) {
       console.error('Error fetching rides:', error);
       setMessage(`Could not load rides: ${error.message}`);
+      setMessageType('error');
       setLoadingRides(false);
       return;
     }
@@ -73,9 +79,111 @@ export default function RidePooling() {
     setLoadingRides(false);
   }
 
-  // Fetch rides when the module opens
+  // Fetch notifications for the logged-in driver
+  async function fetchNotifications(userId) {
+    const { data, error } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('recipient_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching notifications:', error);
+      return;
+    }
+
+    setNotifications(data || []);
+  }
+
+  // Fetch rides already booked by this passenger
+  async function fetchMyBookings(userId) {
+    const { data, error } = await supabase
+      .from('ride_bookings')
+      .select('ride_id')
+      .eq('passenger_id', userId);
+
+    if (error) {
+      console.error('Error fetching bookings:', error);
+      return;
+    }
+
+    setBookedRideIds((data || []).map((booking) => booking.ride_id));
+  }
+
+  // Initial loading + Supabase Realtime subscriptions
   useEffect(() => {
-    fetchRides();
+    let channel;
+    let isMounted = true;
+
+    async function initializeRidePooling() {
+      const {
+        data: { user },
+        error,
+      } = await supabase.auth.getUser();
+
+      if (error || !user) {
+        if (isMounted) {
+          setMessage('Please log in to use RidePooling.');
+          setMessageType('error');
+          setLoadingRides(false);
+        }
+        return;
+      }
+
+      if (!isMounted) return;
+
+      setCurrentUserId(user.id);
+
+      await Promise.all([
+        fetchRides(),
+        fetchNotifications(user.id),
+        fetchMyBookings(user.id),
+      ]);
+
+      if (!isMounted) return;
+
+      // Listen for ride creation and seat-count updates
+      channel = supabase
+        .channel(`ride-pooling-${user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'rides',
+          },
+          () => {
+            fetchRides();
+          }
+        )
+        // Listen for notifications sent to this student
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'notifications',
+            filter: `recipient_id=eq.${user.id}`,
+          },
+          (payload) => {
+            setNotifications((previous) => [
+              payload.new,
+              ...previous,
+            ]);
+          }
+        )
+        .subscribe();
+    }
+
+    initializeRidePooling();
+
+    return () => {
+      isMounted = false;
+
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
   }, []);
 
   // Emission calculations
@@ -96,25 +204,26 @@ export default function RidePooling() {
     );
   });
 
-  // Publish a ride to Supabase
+  // Publish a ride
   async function handleOfferRide(event) {
     event.preventDefault();
     setMessage('');
 
     if (!rideFrom.trim() || !rideTo.trim() || !departureTime) {
       setMessage('Please fill in all ride details.');
+      setMessageType('error');
       return;
     }
 
     if (rideFrom.trim().toLowerCase() === rideTo.trim().toLowerCase()) {
       setMessage('Starting point and destination cannot be the same.');
+      setMessageType('error');
       return;
     }
 
     setPublishing(true);
 
     try {
-      // Get currently logged-in student
       const {
         data: { user },
         error: userError,
@@ -124,7 +233,6 @@ export default function RidePooling() {
         throw new Error('Please log in before publishing a ride.');
       }
 
-      // Insert ride into database
       const { error } = await supabase
         .from('rides')
         .insert({
@@ -135,29 +243,27 @@ export default function RidePooling() {
           available_seats: Number(availableSeats),
         });
 
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
 
       setMessage('Ride published successfully!');
+      setMessageType('success');
 
-      // Reset form
       setRideFrom('');
       setRideTo('');
       setDepartureTime('');
       setAvailableSeats('2');
 
-      // Refresh ride list
       await fetchRides();
     } catch (error) {
       console.error('Error publishing ride:', error);
       setMessage(error.message || 'Could not publish ride.');
+      setMessageType('error');
     } finally {
       setPublishing(false);
     }
   }
 
-  // Join a ride through Supabase database function
+  // Join a ride
   async function handleJoinRide(rideId) {
     setMessage('');
     setJoiningRideId(rideId);
@@ -167,23 +273,58 @@ export default function RidePooling() {
         p_ride_id: rideId,
       });
 
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
+
+      // Remember that this passenger has booked the ride
+      setBookedRideIds((previous) => [...previous, rideId]);
 
       setMessage(
-        `Successfully joined the ride! ${data.remaining_seats} seat(s) remaining.`
+        `Ride confirmed! You've successfully joined this ride. ${data.remaining_seats} seat(s) remaining.`
       );
+      setMessageType('success');
 
-      // Refresh seat count from database
+      // Refresh the latest seat count
       await fetchRides();
     } catch (error) {
       console.error('Error joining ride:', error);
-      setMessage(error.message || 'Could not join this ride.');
+
+      let errorMessage = error.message || 'Could not join this ride.';
+
+      if (errorMessage.toLowerCase().includes('duplicate key')) {
+        errorMessage = 'You have already joined this ride.';
+      }
+
+      setMessage(errorMessage);
+      setMessageType('error');
     } finally {
       setJoiningRideId(null);
     }
   }
+
+  // Mark notification as read
+  async function handleMarkRead(notificationId) {
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('id', notificationId);
+
+    if (error) {
+      console.error('Could not update notification:', error);
+      return;
+    }
+
+    setNotifications((previous) =>
+      previous.map((notification) =>
+        notification.id === notificationId
+          ? { ...notification, is_read: true }
+          : notification
+      )
+    );
+  }
+
+  const unreadCount = notifications.filter(
+    (notification) => !notification.is_read
+  ).length;
 
   return (
     <div className="ride-pooling-module">
@@ -198,12 +339,7 @@ export default function RidePooling() {
         </div>
 
         <div className="uni-card-body">
-          <p
-            style={{
-              color: 'var(--text-secondary)',
-              marginBottom: '16px',
-            }}
-          >
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>
             {moduleData?.description}
           </p>
 
@@ -238,6 +374,82 @@ export default function RidePooling() {
         </div>
       </div>
 
+      {/* Driver notifications */}
+      <div className="uni-card" style={{ marginBottom: '24px' }}>
+        <div className="uni-card-header">
+          <div className="uni-card-title">
+            <Bell size={20} color="var(--brand-green-700)" />
+            <span>Ride Booking Notifications</span>
+          </div>
+
+          <span className="uni-badge uni-badge-neutral">
+            {unreadCount} New
+          </span>
+        </div>
+
+        <div className="uni-card-body">
+          {notifications.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)' }}>
+              No booking notifications yet. You'll see a notification here
+              when another student joins one of your rides.
+            </p>
+          ) : (
+            notifications.map((notification) => (
+              <div
+                key={notification.id}
+                style={{
+                  padding: '14px',
+                  marginBottom: '10px',
+                  borderRadius: '10px',
+                  background: notification.is_read
+                    ? 'var(--bg-canvas)'
+                    : 'var(--surface-secondary, var(--bg-canvas))',
+                  border: '1px solid var(--border-subtle)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '12px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', gap: '10px', flex: 1 }}>
+                  <CheckCircle
+                    size={20}
+                    color="var(--brand-green-700)"
+                  />
+
+                  <div>
+                    <strong>
+                      {notification.is_read
+                        ? 'Booking notification'
+                        : 'New ride booking!'}
+                    </strong>
+
+                    <p style={{ margin: '5px 0' }}>
+                      {notification.message}
+                    </p>
+
+                    <small style={{ color: 'var(--text-secondary)' }}>
+                      {new Date(notification.created_at).toLocaleString()}
+                    </small>
+                  </div>
+                </div>
+
+                {!notification.is_read && (
+                  <button
+                    type="button"
+                    className="uni-button"
+                    onClick={() => handleMarkRead(notification.id)}
+                  >
+                    Mark as read
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
       {/* Offer a ride */}
       <div className="uni-card" style={{ marginBottom: '24px' }}>
         <div className="uni-card-header">
@@ -250,7 +462,6 @@ export default function RidePooling() {
         <div className="uni-card-body">
           <form onSubmit={handleOfferRide}>
             <div className="uni-grid-2">
-
               <div className="uni-form-group">
                 <label className="uni-label" htmlFor="ride-from">
                   Starting Point
@@ -290,9 +501,7 @@ export default function RidePooling() {
                   className="uni-input"
                   type="time"
                   value={departureTime}
-                  onChange={(event) =>
-                    setDepartureTime(event.target.value)
-                  }
+                  onChange={(event) => setDepartureTime(event.target.value)}
                   required
                 />
               </div>
@@ -305,9 +514,7 @@ export default function RidePooling() {
                   id="ride-seats"
                   className="uni-input"
                   value={availableSeats}
-                  onChange={(event) =>
-                    setAvailableSeats(event.target.value)
-                  }
+                  onChange={(event) => setAvailableSeats(event.target.value)}
                 >
                   <option value="1">1 seat</option>
                   <option value="2">2 seats</option>
@@ -331,7 +538,12 @@ export default function RidePooling() {
           {message && (
             <p
               role="status"
-              style={{ marginTop: '12px' }}
+              style={{
+                marginTop: '12px',
+                color: messageType === 'error'
+                  ? 'var(--danger, #dc2626)'
+                  : 'var(--brand-green-700)',
+              }}
             >
               {message}
             </p>
@@ -364,9 +576,7 @@ export default function RidePooling() {
               type="search"
               placeholder="Try Andheri or SPIT Campus..."
               value={searchDestination}
-              onChange={(event) =>
-                setSearchDestination(event.target.value)
-              }
+              onChange={(event) => setSearchDestination(event.target.value)}
             />
           </div>
 
@@ -374,76 +584,96 @@ export default function RidePooling() {
             <p>Loading rides from Supabase...</p>
           ) : filteredRides.length === 0 ? (
             <p style={{ color: 'var(--text-secondary)' }}>
-              No available rides match your search. Try another
-              destination or offer a new ride.
+              No available rides match your search. Try another destination
+              or offer a new ride.
             </p>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column' }}>
-              {filteredRides.map((ride) => (
-                <div
-                  key={ride.id}
-                  style={{
-                    padding: '16px 0',
-                    borderBottom: '1px solid var(--border-subtle)',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: '16px',
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <div style={{ flex: '1 1 220px' }}>
-                    <strong>
-                      {ride.from} → {ride.to}
-                    </strong>
+              {filteredRides.map((ride) => {
+                const isDriver = ride.driver_id === currentUserId;
+                const hasJoined = bookedRideIds.includes(ride.id);
 
-                    <div style={{ marginTop: '6px' }}>
-                      <Users
-                        size={15}
-                        style={{ verticalAlign: 'middle' }}
-                      />
-                      {' '}{ride.seats} seat(s) available
-                    </div>
-
-                    <div style={{ marginTop: '4px' }}>
-                      <Clock
-                        size={15}
-                        style={{ verticalAlign: 'middle' }}
-                      />
-                      {' '}{ride.departureTime}
-                    </div>
-
-                    <div
-                      style={{
-                        marginTop: '4px',
-                        color: 'var(--text-secondary)',
-                      }}
-                    >
-                      {ride.driverType}
-                    </div>
-                  </div>
-
-                  <button
-                    className="uni-button"
-                    type="button"
-                    disabled={
-                      ride.seats <= 0 ||
-                      joiningRideId === ride.id
-                    }
-                    onClick={() => handleJoinRide(ride.id)}
+                return (
+                  <div
+                    key={ride.id}
+                    style={{
+                      padding: '16px 0',
+                      borderBottom: '1px solid var(--border-subtle)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: '16px',
+                      flexWrap: 'wrap',
+                    }}
                   >
-                    <UserPlus size={16} />
-                    {joiningRideId === ride.id
-                      ? 'Joining...'
-                      : 'Join Ride'}
-                  </button>
-                </div>
-              ))}
+                    <div style={{ flex: '1 1 220px' }}>
+                      <strong>
+                        {ride.from} → {ride.to}
+                      </strong>
+
+                      <div style={{ marginTop: '6px' }}>
+                        <Users
+                          size={15}
+                          style={{ verticalAlign: 'middle' }}
+                        />
+                        {' '}{ride.seats} seat(s) available
+                      </div>
+
+                      <div style={{ marginTop: '4px' }}>
+                        <Clock
+                          size={15}
+                          style={{ verticalAlign: 'middle' }}
+                        />
+                        {' '}{ride.departureTime}
+                      </div>
+
+                      <div
+                        style={{
+                          marginTop: '4px',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        {ride.driverType}
+                      </div>
+                    </div>
+
+                    <button
+                      className="uni-button"
+                      type="button"
+                      disabled={
+                        isDriver ||
+                        hasJoined ||
+                        ride.seats <= 0 ||
+                        joiningRideId === ride.id
+                      }
+                      onClick={() => handleJoinRide(ride.id)}
+                    >
+                      <UserPlus size={16} />
+
+                      {isDriver
+                        ? 'Your Ride'
+                        : hasJoined
+                          ? 'Joined'
+                          : joiningRideId === ride.id
+                            ? 'Joining...'
+                            : 'Join Ride'}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
 
           {message && (
-            <p role="status" style={{ marginTop: '12px' }}>
+            <p
+              role="status"
+              style={{
+                marginTop: '12px',
+                color: messageType === 'error'
+                  ? 'var(--danger, #dc2626)'
+                  : 'var(--brand-green-700)',
+              }}
+            >
               {message}
             </p>
           )}
@@ -517,7 +747,6 @@ export default function RidePooling() {
               }}
             >
               <div>Estimated Net Avoided Emissions</div>
-
               <h2>{savedKg.toFixed(2)} kg CO₂e</h2>
 
               <p>
