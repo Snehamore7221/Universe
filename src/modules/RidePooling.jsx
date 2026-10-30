@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Car,
   MapPin,
@@ -12,7 +12,9 @@ import {
   PlusCircle,
   UserPlus,
 } from 'lucide-react';
+
 import { MODULES } from '../data/seed';
+import { supabase } from '../lib/supabase';
 
 export default function RidePooling() {
   const moduleData = MODULES.find((m) => m.id === 'ride-pooling');
@@ -22,22 +24,14 @@ export default function RidePooling() {
   const [commuteDistance, setCommuteDistance] = useState(12);
   const [coRiders, setCoRiders] = useState(3);
 
-  // Convert existing sample routes into interactive rides
-  const [rides, setRides] = useState(() =>
-    sampleRoutes.map((route) => {
-      const [from = route.corridor, to = ''] =
-        route.corridor.split(' -> ');
+  // Supabase rides state
+  const [rides, setRides] = useState([]);
+  const [loadingRides, setLoadingRides] = useState(true);
+  const [publishing, setPublishing] = useState(false);
+  const [joiningRideId, setJoiningRideId] = useState(null);
 
-      return {
-        ...route,
-        from,
-        to,
-        departureTime: route.departsIn,
-        seats: route.availableSeats,
-        joined: false,
-      };
-    })
-  );
+  // Status messages
+  const [message, setMessage] = useState('');
 
   // Offer Ride form state
   const [rideFrom, setRideFrom] = useState('');
@@ -48,10 +42,48 @@ export default function RidePooling() {
   // Find Ride search state
   const [searchDestination, setSearchDestination] = useState('');
 
+  // Fetch rides from Supabase
+  async function fetchRides() {
+    setLoadingRides(true);
+
+    const { data, error } = await supabase
+      .from('rides')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching rides:', error);
+      setMessage(`Could not load rides: ${error.message}`);
+      setLoadingRides(false);
+      return;
+    }
+
+    const formattedRides = (data || []).map((ride) => ({
+      ...ride,
+      from: ride.pickup_location,
+      to: ride.destination,
+      corridor: `${ride.pickup_location} -> ${ride.destination}`,
+      departureTime: ride.departure_time,
+      seats: ride.available_seats,
+      driverType: 'Student Commuter',
+      estDistanceKm: 0,
+    }));
+
+    setRides(formattedRides);
+    setLoadingRides(false);
+  }
+
+  // Fetch rides when the module opens
+  useEffect(() => {
+    fetchRides();
+  }, []);
+
+  // Emission calculations
   const soloKg = commuteDistance * 0.17;
   const pooledKg = soloKg / (coRiders + 1);
   const savedKg = soloKg - pooledKg;
 
+  // Search available rides
   const filteredRides = rides.filter((ride) => {
     const query = searchDestination.trim().toLowerCase();
 
@@ -64,59 +96,103 @@ export default function RidePooling() {
     );
   });
 
-  function handleOfferRide(event) {
+  // Publish a ride to Supabase
+  async function handleOfferRide(event) {
     event.preventDefault();
+    setMessage('');
 
     if (!rideFrom.trim() || !rideTo.trim() || !departureTime) {
+      setMessage('Please fill in all ride details.');
       return;
     }
 
-    const newRide = {
-      id: `rt-${Date.now()}`,
-      from: rideFrom.trim(),
-      to: rideTo.trim(),
-      corridor: `${rideFrom.trim()} -> ${rideTo.trim()}`,
-      departureTime,
-      departsIn: departureTime,
-      availableSeats: Number(availableSeats),
-      seats: Number(availableSeats),
-      driverType: 'Student Commuter',
-      estDistanceKm: 0,
-      joined: false,
-    };
+    if (rideFrom.trim().toLowerCase() === rideTo.trim().toLowerCase()) {
+      setMessage('Starting point and destination cannot be the same.');
+      return;
+    }
 
-    setRides((previousRides) => [...previousRides, newRide]);
+    setPublishing(true);
 
-    setRideFrom('');
-    setRideTo('');
-    setDepartureTime('');
-    setAvailableSeats('2');
+    try {
+      // Get currently logged-in student
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        throw new Error('Please log in before publishing a ride.');
+      }
+
+      // Insert ride into database
+      const { error } = await supabase
+        .from('rides')
+        .insert({
+          driver_id: user.id,
+          pickup_location: rideFrom.trim(),
+          destination: rideTo.trim(),
+          departure_time: departureTime,
+          available_seats: Number(availableSeats),
+        });
+
+      if (error) {
+        throw error;
+      }
+
+      setMessage('Ride published successfully!');
+
+      // Reset form
+      setRideFrom('');
+      setRideTo('');
+      setDepartureTime('');
+      setAvailableSeats('2');
+
+      // Refresh ride list
+      await fetchRides();
+    } catch (error) {
+      console.error('Error publishing ride:', error);
+      setMessage(error.message || 'Could not publish ride.');
+    } finally {
+      setPublishing(false);
+    }
   }
 
-  function handleJoinRide(rideId) {
-    setRides((previousRides) =>
-      previousRides.map((ride) =>
-        ride.id === rideId && ride.seats > 0 && !ride.joined
-          ? {
-              ...ride,
-              seats: ride.seats - 1,
-              joined: true,
-            }
-          : ride
-      )
-    );
+  // Join a ride through Supabase database function
+  async function handleJoinRide(rideId) {
+    setMessage('');
+    setJoiningRideId(rideId);
+
+    try {
+      const { data, error } = await supabase.rpc('join_ride', {
+        p_ride_id: rideId,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      setMessage(
+        `Successfully joined the ride! ${data.remaining_seats} seat(s) remaining.`
+      );
+
+      // Refresh seat count from database
+      await fetchRides();
+    } catch (error) {
+      console.error('Error joining ride:', error);
+      setMessage(error.message || 'Could not join this ride.');
+    } finally {
+      setJoiningRideId(null);
+    }
   }
 
   return (
     <div className="ride-pooling-module">
+
       {/* Module overview */}
       <div className="uni-card" style={{ marginBottom: '24px' }}>
         <div className="uni-card-header">
           <div className="uni-card-title">
-            <ShieldCheck
-              size={20}
-              color="var(--brand-green-700)"
-            />
+            <ShieldCheck size={20} color="var(--brand-green-700)" />
             <span>Smart Campus Ride-Pooling & Commuter Mobility</span>
           </div>
         </div>
@@ -142,10 +218,7 @@ export default function RidePooling() {
             </div>
 
             <div>
-              <ShieldCheck
-                size={22}
-                color="var(--brand-green-700)"
-              />
+              <ShieldCheck size={22} color="var(--brand-green-700)" />
               <strong>Verified Campus Identity</strong>
               <p>
                 Designed for institutional authentication of campus
@@ -169,10 +242,7 @@ export default function RidePooling() {
       <div className="uni-card" style={{ marginBottom: '24px' }}>
         <div className="uni-card-header">
           <div className="uni-card-title">
-            <PlusCircle
-              size={20}
-              color="var(--brand-green-700)"
-            />
+            <PlusCircle size={20} color="var(--brand-green-700)" />
             <span>Offer a Ride</span>
           </div>
         </div>
@@ -180,6 +250,7 @@ export default function RidePooling() {
         <div className="uni-card-body">
           <form onSubmit={handleOfferRide}>
             <div className="uni-grid-2">
+
               <div className="uni-form-group">
                 <label className="uni-label" htmlFor="ride-from">
                   Starting Point
@@ -247,11 +318,24 @@ export default function RidePooling() {
               </div>
             </div>
 
-            <button className="uni-button" type="submit">
+            <button
+              className="uni-button"
+              type="submit"
+              disabled={publishing}
+            >
               <Car size={17} />
-              Publish Ride
+              {publishing ? 'Publishing...' : 'Publish Ride'}
             </button>
           </form>
+
+          {message && (
+            <p
+              role="status"
+              style={{ marginTop: '12px' }}
+            >
+              {message}
+            </p>
+          )}
         </div>
       </div>
 
@@ -273,11 +357,12 @@ export default function RidePooling() {
             <label className="uni-label" htmlFor="ride-search">
               Search by starting point or destination
             </label>
+
             <input
               id="ride-search"
               className="uni-input"
               type="search"
-              placeholder="Try Engineering Hall or West Campus..."
+              placeholder="Try Andheri or SPIT Campus..."
               value={searchDestination}
               onChange={(event) =>
                 setSearchDestination(event.target.value)
@@ -285,7 +370,9 @@ export default function RidePooling() {
             />
           </div>
 
-          {filteredRides.length === 0 ? (
+          {loadingRides ? (
+            <p>Loading rides from Supabase...</p>
+          ) : filteredRides.length === 0 ? (
             <p style={{ color: 'var(--text-secondary)' }}>
               No available rides match your search. Try another
               destination or offer a new ride.
@@ -306,15 +393,26 @@ export default function RidePooling() {
                   }}
                 >
                   <div style={{ flex: '1 1 220px' }}>
-                    <strong>{ride.from} → {ride.to}</strong>
+                    <strong>
+                      {ride.from} → {ride.to}
+                    </strong>
+
                     <div style={{ marginTop: '6px' }}>
-                      <Users size={15} style={{ verticalAlign: 'middle' }} />
+                      <Users
+                        size={15}
+                        style={{ verticalAlign: 'middle' }}
+                      />
                       {' '}{ride.seats} seat(s) available
                     </div>
+
                     <div style={{ marginTop: '4px' }}>
-                      <Clock size={15} style={{ verticalAlign: 'middle' }} />
+                      <Clock
+                        size={15}
+                        style={{ verticalAlign: 'middle' }}
+                      />
                       {' '}{ride.departureTime}
                     </div>
+
                     <div
                       style={{
                         marginTop: '4px',
@@ -322,24 +420,32 @@ export default function RidePooling() {
                       }}
                     >
                       {ride.driverType}
-                      {ride.estDistanceKm > 0
-                        ? ` • ${ride.estDistanceKm} km estimated`
-                        : ''}
                     </div>
                   </div>
 
                   <button
                     className="uni-button"
                     type="button"
-                    disabled={ride.seats <= 0 || ride.joined}
+                    disabled={
+                      ride.seats <= 0 ||
+                      joiningRideId === ride.id
+                    }
                     onClick={() => handleJoinRide(ride.id)}
                   >
                     <UserPlus size={16} />
-                    {ride.joined ? 'Joined' : 'Join Ride'}
+                    {joiningRideId === ride.id
+                      ? 'Joining...'
+                      : 'Join Ride'}
                   </button>
                 </div>
               ))}
             </div>
+          )}
+
+          {message && (
+            <p role="status" style={{ marginTop: '12px' }}>
+              {message}
+            </p>
           )}
         </div>
       </div>
@@ -348,12 +454,10 @@ export default function RidePooling() {
       <div className="uni-card" style={{ marginBottom: '24px' }}>
         <div className="uni-card-header">
           <div className="uni-card-title">
-            <Calculator
-              size={20}
-              color="var(--brand-green-700)"
-            />
+            <Calculator size={20} color="var(--brand-green-700)" />
             <span>Commuter Emission Estimation Model</span>
           </div>
+
           <span className="uni-badge uni-badge-neutral">
             Mathematical Model
           </span>
@@ -366,6 +470,7 @@ export default function RidePooling() {
                 <label className="uni-label">
                   One-Way Commute Distance: {commuteDistance} km
                 </label>
+
                 <input
                   type="range"
                   min="2"
@@ -383,6 +488,7 @@ export default function RidePooling() {
                 <label className="uni-label">
                   Number of Co-Riders Sharing Trip: {coRiders} Passengers
                 </label>
+
                 <input
                   type="range"
                   min="1"
@@ -411,7 +517,9 @@ export default function RidePooling() {
               }}
             >
               <div>Estimated Net Avoided Emissions</div>
+
               <h2>{savedKg.toFixed(2)} kg CO₂e</h2>
+
               <p>
                 Baseline solo trip: {soloKg.toFixed(2)} kg CO₂e vs.
                 pooled trip: {pooledKg.toFixed(2)} kg CO₂e per passenger.
@@ -429,6 +537,7 @@ export default function RidePooling() {
               <MapPin size={20} color="var(--brand-green-700)" />
               <span>Original Sample Route Corridors</span>
             </div>
+
             <div className="uni-card-desc">
               Reference data provided by the UniVerse prototype.
             </div>
@@ -445,6 +554,7 @@ export default function RidePooling() {
               }}
             >
               <strong>{route.corridor}</strong>
+
               <div style={{ marginTop: '5px' }}>
                 {route.driverType} • {route.estDistanceKm} km
                 {' • '}{route.availableSeats} sample seats
