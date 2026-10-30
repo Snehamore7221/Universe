@@ -192,7 +192,7 @@ function CampusApp({ user }) {
                   module={currentModuleData}
                   onBackToDashboard={handleBackToDashboard}
                 >
-                  <StudentHub />
+                  <StudentHub user={user} />
                 </ModuleLayout>
               )}
 

@@ -1,10 +1,9 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   GraduationCap,
   Users,
   BookOpen,
-  Calendar,
   Sparkles,
   Search,
   Clock,
@@ -18,7 +17,9 @@ import {
   X,
 } from 'lucide-react';
 
+import { supabase } from '../lib/supabase';
 import { MODULES } from '../data/seed';
+
 import {
   STUDENT_PROFILE,
   PLACEMENT_TASKS,
@@ -26,16 +27,75 @@ import {
   SAMPLE_ACADEMIC_RESOURCES,
 } from '../data/seed';
 
-export default function StudentHub() {
+export default function StudentHub({ user }) {
   const moduleData = MODULES.find((m) => m.id === 'student-hub');
 
   const [activeTab, setActiveTab] = useState('placement');
   const [tasks, setTasks] = useState(PLACEMENT_TASKS);
+
   const [mentorQuery, setMentorQuery] = useState('');
   const [resourceQuery, setResourceQuery] = useState('');
   const [resourceType, setResourceType] = useState('All');
   const [requestedMentors, setRequestedMentors] = useState([]);
   const [filterQuery, setFilterQuery] = useState('');
+
+  // Logged-in student's profile
+  const [studentProfile, setStudentProfile] = useState({
+    name: '',
+    year: '',
+    branch: '',
+    skills: [],
+  });
+
+  const [profileLoading, setProfileLoading] = useState(true);
+
+  // Fetch the logged-in student's profile from Supabase.
+  useEffect(() => {
+    let active = true;
+
+    const loadStudentProfile = async () => {
+      if (!user?.id) {
+        setProfileLoading(false);
+        return;
+      }
+
+      setProfileLoading(true);
+
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('full_name, department, academic_year, skills')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (!active) return;
+
+      if (error) {
+        console.error('Student profile fetch failed:', error.message);
+      }
+
+      setStudentProfile({
+        name:
+          data?.full_name?.trim() ||
+          user.user_metadata?.full_name ||
+          user.email?.split('@')[0] ||
+          'Student',
+
+        year: data?.academic_year || '',
+
+        branch: data?.department || '',
+
+        skills: data?.skills || [],
+      });
+
+      setProfileLoading(false);
+    };
+
+    loadStudentProfile();
+
+    return () => {
+      active = false;
+    };
+  }, [user?.id]);
 
   const studyCircles = moduleData?.sampleStudyCircles || [];
 
@@ -46,6 +106,7 @@ export default function StudentHub() {
   );
 
   const completedTasks = tasks.filter((task) => task.completed).length;
+
   const progress = tasks.length
     ? Math.round((completedTasks / tasks.length) * 100)
     : 0;
@@ -83,6 +144,7 @@ export default function StudentHub() {
 
   return (
     <div className="student-hub-module">
+
       {/* Student Profile */}
       <div className="uni-card" style={{ marginBottom: '20px' }}>
         <div
@@ -114,11 +176,15 @@ export default function StudentHub() {
 
             <div>
               <h2 style={{ fontSize: '1.2rem', marginBottom: '3px' }}>
-                {STUDENT_PROFILE.name}
+                {profileLoading ? 'Loading profile...' : studentProfile.name}
               </h2>
+
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>
-                {STUDENT_PROFILE.year} · {STUDENT_PROFILE.branch}
+                {[studentProfile.year, studentProfile.branch]
+                  .filter(Boolean)
+                  .join(' · ') || 'Student'}
               </p>
+
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>
                 Goal: {STUDENT_PROFILE.careerGoal}
               </p>
@@ -137,20 +203,26 @@ export default function StudentHub() {
             </p>
 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-              {STUDENT_PROFILE.skills.map((skill) => (
-                <span
-                  key={skill}
-                  style={{
-                    padding: '5px 9px',
-                    background: 'var(--brand-green-50)',
-                    color: 'var(--brand-green-800)',
-                    borderRadius: 'var(--radius-full)',
-                    fontSize: '0.78rem',
-                  }}
-                >
-                  {skill}
+              {studentProfile.skills.length > 0 ? (
+                studentProfile.skills.map((skill) => (
+                  <span
+                    key={skill}
+                    style={{
+                      padding: '5px 9px',
+                      background: 'var(--brand-green-50)',
+                      color: 'var(--brand-green-800)',
+                      borderRadius: 'var(--radius-full)',
+                      fontSize: '0.78rem',
+                    }}
+                  >
+                    {skill}
+                  </span>
+                ))
+              ) : (
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                  Add skills in My Profile
                 </span>
-              ))}
+              )}
             </div>
           </div>
         </div>
@@ -182,9 +254,7 @@ export default function StudentHub() {
                 padding: '11px 15px',
                 borderRadius: 'var(--radius-md)',
                 border: `1px solid ${
-                  selected
-                    ? 'var(--brand-green-600)'
-                    : 'var(--border-default)'
+                  selected ? 'var(--brand-green-600)' : 'var(--border-default)'
                 }`,
                 background: selected
                   ? 'var(--brand-green-50)'
@@ -315,10 +385,7 @@ export default function StudentHub() {
                   </div>
 
                   {task.completed ? (
-                    <CheckCircle2
-                      size={19}
-                      color="var(--brand-green-600)"
-                    />
+                    <CheckCircle2 size={19} color="var(--brand-green-600)" />
                   ) : (
                     <Circle size={19} color="var(--text-light)" />
                   )}
