@@ -13,6 +13,9 @@ import {
   UserPlus,
   Bell,
   CheckCircle,
+  MessageCircle,
+  Send,
+  X,
 } from 'lucide-react';
 
 import { MODULES } from '../data/seed';
@@ -32,9 +35,18 @@ export default function RidePooling() {
   const [bookedRideIds, setBookedRideIds] = useState([]);
   const [currentUserId, setCurrentUserId] = useState(null);
 
+  // Chat state
+  const [chatRides, setChatRides] = useState([]);
+  const [activeChatRide, setActiveChatRide] = useState(null);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [newChatMessage, setNewChatMessage] = useState('');
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState(false);
+
   const [loadingRides, setLoadingRides] = useState(true);
   const [publishing, setPublishing] = useState(false);
   const [joiningRideId, setJoiningRideId] = useState(null);
+  const [markingReadId, setMarkingReadId] = useState(null);
 
   // Status messages
   const [message, setMessage] = useState('');
@@ -79,7 +91,7 @@ export default function RidePooling() {
     setLoadingRides(false);
   }
 
-  // Fetch notifications for the logged-in driver
+  // Fetch notifications
   async function fetchNotifications(userId) {
     const { data, error } = await supabase
       .from('notifications')
@@ -110,7 +122,274 @@ export default function RidePooling() {
     setBookedRideIds((data || []).map((booking) => booking.ride_id));
   }
 
-  // Initial loading + Supabase Realtime subscriptions
+  // Fetch all ride conversations involving the current student
+  async function fetchChatRides(userId) {
+    const { data: allRides, error: ridesError } = await supabase
+      .from('rides')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (ridesError) {
+      console.error('Could not fetch chat rides:', ridesError);
+      return;
+    }
+
+    const { data: bookings, error: bookingsError } = await supabase
+      .from('ride_bookings')
+      .select('ride_id, passenger_id');
+
+    if (bookingsError) {
+      console.error('Could not fetch ride participants:', bookingsError);
+      return;
+    }
+
+    const myRides = (allRides || []).filter((ride) => {
+      return (
+        ride.driver_id === userId ||
+        (bookings || []).some(
+          (booking) =>
+            booking.ride_id === ride.id &&
+            booking.passenger_id === userId
+        )
+      );
+    });
+
+    if (myRides.length === 0) {
+      setChatRides([]);
+      return;
+    }
+
+    const rideIds = myRides.map((ride) => ride.id);
+
+    const rideBookings = (bookings || []).filter((booking) =>
+      rideIds.includes(booking.ride_id)
+    );
+
+    const participantIds = [
+      ...new Set([
+        ...myRides.map((ride) => ride.driver_id),
+        ...rideBookings.map((booking) => booking.passenger_id),
+      ]),
+    ];
+
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, full_name')
+      .in('id', participantIds);
+
+    if (profilesError) {
+      console.error('Could not fetch student profiles:', profilesError);
+      return;
+    }
+
+    const profileMap = {};
+
+    (profiles || []).forEach((profile) => {
+      profileMap[profile.id] = profile.full_name || 'Student';
+    });
+
+    const formattedChats = myRides
+      .map((ride) => {
+        const passengers = rideBookings
+          .filter((booking) => booking.ride_id === ride.id)
+          .map((booking) => ({
+            id: booking.passenger_id,
+            name: profileMap[booking.passenger_id] || 'Student',
+          }));
+
+        return {
+          ...ride,
+          driverName: profileMap[ride.driver_id] || 'Student',
+          passengers,
+          participants: [
+            {
+              id: ride.driver_id,
+              name: profileMap[ride.driver_id] || 'Student',
+            },
+            ...passengers,
+          ],
+        };
+      })
+      .filter((ride) => ride.participants.length > 1);
+
+    setChatRides(formattedChats);
+  }
+
+  // Fetch previous messages for a ride
+  async function fetchChatMessages(rideId) {
+    setLoadingMessages(true);
+
+    const { data, error } = await supabase
+      .from('ride_messages')
+      .select('*')
+      .eq('ride_id', rideId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.error('Could not load messages:', error);
+      setMessage(`Could not load chat: ${error.message}`);
+      setMessageType('error');
+      setLoadingMessages(false);
+      return;
+    }
+
+    setChatMessages(data || []);
+    setLoadingMessages(false);
+  }
+
+  // Open a ride conversation
+  async function handleOpenChat(ride) {
+    setActiveChatRide(ride);
+    setChatMessages([]);
+    setNewChatMessage('');
+    setMessage('');
+
+    await fetchChatMessages(ride.id);
+
+    // Scroll to the selected chat
+    setTimeout(() => {
+      document.getElementById('ride-chat-window')?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }, 100);
+  }
+
+  // Open chat using notification's ride ID
+  async function handleOpenNotificationChat(rideId) {
+    if (!rideId) {
+      setMessage('This notification is not linked to a ride.');
+      setMessageType('error');
+      return;
+    }
+
+    let ride = chatRides.find((item) => item.id === rideId);
+
+    // Refresh conversations if the ride is not already in the list
+    if (!ride && currentUserId) {
+      await fetchChatRides(currentUserId);
+
+      const { data: rideData, error } = await supabase
+        .from('rides')
+        .select('*')
+        .eq('id', rideId)
+        .single();
+
+      if (error || !rideData) {
+        setMessage('Could not find this ride conversation.');
+        setMessageType('error');
+        return;
+      }
+
+      const { data: bookings, error: bookingsError } = await supabase
+        .from('ride_bookings')
+        .select('passenger_id')
+        .eq('ride_id', rideId);
+
+      if (bookingsError) {
+        setMessage('Could not load ride participants.');
+        setMessageType('error');
+        return;
+      }
+
+      const participantIds = [
+        rideData.driver_id,
+        ...(bookings || []).map((booking) => booking.passenger_id),
+      ];
+
+      const { data: profiles, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .in('id', participantIds);
+
+      if (profilesError) {
+        setMessage('Could not load participant names.');
+        setMessageType('error');
+        return;
+      }
+
+      const profileMap = {};
+
+      (profiles || []).forEach((profile) => {
+        profileMap[profile.id] = profile.full_name || 'Student';
+      });
+
+      const passengers = (bookings || []).map((booking) => ({
+        id: booking.passenger_id,
+        name: profileMap[booking.passenger_id] || 'Student',
+      }));
+
+      ride = {
+        ...rideData,
+        driverName: profileMap[rideData.driver_id] || 'Student',
+        passengers,
+        participants: [
+          {
+            id: rideData.driver_id,
+            name: profileMap[rideData.driver_id] || 'Student',
+          },
+          ...passengers,
+        ],
+      };
+    }
+
+    if (!ride) {
+      setMessage('Could not find this ride conversation.');
+      setMessageType('error');
+      return;
+    }
+
+    await handleOpenChat(ride);
+  }
+
+  // Close a ride conversation
+  function handleCloseChat() {
+    setActiveChatRide(null);
+    setChatMessages([]);
+    setNewChatMessage('');
+  }
+
+  // Send a chat message
+  async function handleSendMessage(event) {
+    event.preventDefault();
+
+    const text = newChatMessage.trim();
+
+    if (!text || !activeChatRide || !currentUserId) return;
+
+    setSendingMessage(true);
+
+    const { data, error } = await supabase
+      .from('ride_messages')
+      .insert({
+        ride_id: activeChatRide.id,
+        sender_id: currentUserId,
+        message: text,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Could not send message:', error);
+      setMessage(`Could not send message: ${error.message}`);
+      setMessageType('error');
+    } else {
+      setChatMessages((previous) => {
+        if (previous.some((item) => item.id === data.id)) {
+          return previous;
+        }
+
+        return [...previous, data];
+      });
+
+      setNewChatMessage('');
+      setMessage('');
+    }
+
+    setSendingMessage(false);
+  }
+
+  // Initial loading + Realtime subscriptions
   useEffect(() => {
     let channel;
     let isMounted = true;
@@ -138,13 +417,15 @@ export default function RidePooling() {
         fetchRides(),
         fetchNotifications(user.id),
         fetchMyBookings(user.id),
+        fetchChatRides(user.id),
       ]);
 
       if (!isMounted) return;
 
-      // Listen for ride creation and seat-count updates
       channel = supabase
         .channel(`ride-pooling-${user.id}`)
+
+        // Listen for ride creation and seat-count updates
         .on(
           'postgres_changes',
           {
@@ -154,8 +435,25 @@ export default function RidePooling() {
           },
           () => {
             fetchRides();
+            fetchChatRides(user.id);
+            fetchMyBookings(user.id);
           }
         )
+
+        // Listen for new bookings
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'ride_bookings',
+          },
+          () => {
+            fetchChatRides(user.id);
+            fetchMyBookings(user.id);
+          }
+        )
+
         // Listen for notifications sent to this student
         .on(
           'postgres_changes',
@@ -185,6 +483,37 @@ export default function RidePooling() {
       }
     };
   }, []);
+
+  // Listen for new messages in the selected ride chat
+  useEffect(() => {
+    if (!activeChatRide || !currentUserId) return;
+
+    const channel = supabase
+      .channel(`ride-chat-${activeChatRide.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'ride_messages',
+          filter: `ride_id=eq.${activeChatRide.id}`,
+        },
+        (payload) => {
+          setChatMessages((previous) => {
+            if (previous.some((item) => item.id === payload.new.id)) {
+              return previous;
+            }
+
+            return [...previous, payload.new];
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeChatRide?.id, currentUserId]);
 
   // Emission calculations
   const soloKg = commuteDistance * 0.17;
@@ -275,16 +604,22 @@ export default function RidePooling() {
 
       if (error) throw error;
 
-      // Remember that this passenger has booked the ride
-      setBookedRideIds((previous) => [...previous, rideId]);
+      setBookedRideIds((previous) =>
+        previous.includes(rideId)
+          ? previous
+          : [...previous, rideId]
+      );
 
       setMessage(
         `Ride confirmed! You've successfully joined this ride. ${data.remaining_seats} seat(s) remaining.`
       );
       setMessageType('success');
 
-      // Refresh the latest seat count
-      await fetchRides();
+      await Promise.all([
+        fetchRides(),
+        fetchMyBookings(currentUserId),
+        fetchChatRides(currentUserId),
+      ]);
     } catch (error) {
       console.error('Error joining ride:', error);
 
@@ -303,13 +638,19 @@ export default function RidePooling() {
 
   // Mark notification as read
   async function handleMarkRead(notificationId) {
+    setMarkingReadId(notificationId);
+
     const { error } = await supabase
       .from('notifications')
       .update({ is_read: true })
-      .eq('id', notificationId);
+      .eq('id', notificationId)
+      .eq('recipient_id', currentUserId);
 
     if (error) {
       console.error('Could not update notification:', error);
+      setMessage(`Could not mark notification as read: ${error.message}`);
+      setMessageType('error');
+      setMarkingReadId(null);
       return;
     }
 
@@ -320,6 +661,8 @@ export default function RidePooling() {
           : notification
       )
     );
+
+    setMarkingReadId(null);
   }
 
   const unreadCount = notifications.filter(
@@ -374,7 +717,7 @@ export default function RidePooling() {
         </div>
       </div>
 
-      {/* Driver notifications */}
+      {/* Ride booking notifications */}
       <div className="uni-card" style={{ marginBottom: '24px' }}>
         <div className="uni-card-header">
           <div className="uni-card-title">
@@ -383,7 +726,7 @@ export default function RidePooling() {
           </div>
 
           <span className="uni-badge uni-badge-neutral">
-            {unreadCount} New
+            {unreadCount} Unread
           </span>
         </div>
 
@@ -435,20 +778,260 @@ export default function RidePooling() {
                   </div>
                 </div>
 
-                {!notification.is_read && (
-                  <button
-                    type="button"
-                    className="uni-button"
-                    onClick={() => handleMarkRead(notification.id)}
-                  >
-                    Mark as read
-                  </button>
-                )}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  {notification.ride_id && (
+                    <button
+                      type="button"
+                      className="uni-button"
+                      onClick={() =>
+                        handleOpenNotificationChat(notification.ride_id)
+                      }
+                    >
+                      <MessageCircle size={16} />
+                      Open Chat
+                    </button>
+                  )}
+
+                  {!notification.is_read && (
+                    <button
+                      type="button"
+                      className="uni-button"
+                      disabled={markingReadId === notification.id}
+                      onClick={() => handleMarkRead(notification.id)}
+                    >
+                      <CheckCircle size={16} />
+                      {markingReadId === notification.id
+                        ? 'Updating...'
+                        : 'Mark as Read'}
+                    </button>
+                  )}
+                </div>
               </div>
             ))
           )}
         </div>
       </div>
+
+      {/* My Ride Chats */}
+      <div className="uni-card" style={{ marginBottom: '24px' }}>
+        <div className="uni-card-header">
+          <div className="uni-card-title">
+            <MessageCircle size={20} color="var(--brand-green-700)" />
+            <span>My Ride Chats</span>
+          </div>
+
+          <span className="uni-badge uni-badge-neutral">
+            {chatRides.length} Conversations
+          </span>
+        </div>
+
+        <div className="uni-card-body">
+          {chatRides.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)' }}>
+              No ride conversations yet. Once someone joins your ride
+              or you book a ride, your chat will appear here.
+            </p>
+          ) : (
+            chatRides.map((ride) => (
+              <div
+                key={ride.id}
+                style={{
+                  padding: '14px 0',
+                  borderBottom: '1px solid var(--border-subtle)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '12px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ flex: '1 1 220px' }}>
+                  <strong>
+                    {ride.pickup_location} → {ride.destination}
+                  </strong>
+
+                  <p style={{ margin: '5px 0' }}>
+                    Driver: {ride.driverName}
+                  </p>
+
+                  <small style={{ color: 'var(--text-secondary)' }}>
+                    Participants:{' '}
+                    {ride.participants
+                      .map((person) => person.name)
+                      .join(', ')}
+                  </small>
+                </div>
+
+                <button
+                  type="button"
+                  className="uni-button"
+                  onClick={() => handleOpenChat(ride)}
+                >
+                  <MessageCircle size={16} />
+                  Open Chat
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Selected Ride Chat */}
+      {activeChatRide && (
+        <div
+          id="ride-chat-window"
+          className="uni-card"
+          style={{ marginBottom: '24px' }}
+        >
+          <div className="uni-card-header">
+            <div className="uni-card-title">
+              <Users size={20} color="var(--brand-green-700)" />
+              <span>Ride Conversation</span>
+            </div>
+
+            <button
+              type="button"
+              className="uni-button"
+              onClick={handleCloseChat}
+            >
+              <X size={16} />
+              Close Chat
+            </button>
+          </div>
+
+          <div className="uni-card-body">
+            <strong>
+              {activeChatRide.pickup_location} →{' '}
+              {activeChatRide.destination}
+            </strong>
+
+            <p style={{ color: 'var(--text-secondary)', marginTop: '6px' }}>
+              Driver: {activeChatRide.driverName}
+            </p>
+
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '8px',
+                marginBottom: '16px',
+              }}
+            >
+              {activeChatRide.participants.map((person) => (
+                <span
+                  key={person.id}
+                  className="uni-badge uni-badge-neutral"
+                >
+                  {person.name}
+                  {person.id === currentUserId ? ' (You)' : ''}
+                </span>
+              ))}
+            </div>
+
+            {/* Message history */}
+            <div
+              style={{
+                minHeight: '220px',
+                maxHeight: '350px',
+                overflowY: 'auto',
+                padding: '14px',
+                background: 'var(--bg-canvas)',
+                borderRadius: '10px',
+                marginBottom: '16px',
+              }}
+            >
+              {loadingMessages ? (
+                <p>Loading messages...</p>
+              ) : chatMessages.length === 0 ? (
+                <p style={{ color: 'var(--text-secondary)' }}>
+                  No messages yet. Say hello and coordinate your ride!
+                </p>
+              ) : (
+                chatMessages.map((chatMessage) => {
+                  const sender = activeChatRide.participants.find(
+                    (person) => person.id === chatMessage.sender_id
+                  );
+
+                  const isMine =
+                    chatMessage.sender_id === currentUserId;
+
+                  return (
+                    <div
+                      key={chatMessage.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: isMine ? 'flex-end' : 'flex-start',
+                        marginBottom: '12px',
+                      }}
+                    >
+                      <div
+                        style={{
+                          maxWidth: '80%',
+                          padding: '10px 14px',
+                          borderRadius: '12px',
+                          background: isMine
+                            ? 'var(--surface-secondary, #dcfce7)'
+                            : 'var(--surface)',
+                          border: '1px solid var(--border-subtle)',
+                        }}
+                      >
+                        <strong style={{ fontSize: '13px' }}>
+                          {isMine ? 'You' : sender?.name || 'Student'}
+                        </strong>
+
+                        <p
+                          style={{
+                            margin: '5px 0',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          {chatMessage.message}
+                        </p>
+
+                        <small style={{ color: 'var(--text-secondary)' }}>
+                          {new Date(chatMessage.created_at).toLocaleString()}
+                        </small>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Send message */}
+            <form
+              onSubmit={handleSendMessage}
+              style={{
+                display: 'flex',
+                gap: '10px',
+                alignItems: 'center',
+              }}
+            >
+              <input
+                className="uni-input"
+                type="text"
+                placeholder="Type your message..."
+                value={newChatMessage}
+                onChange={(event) =>
+                  setNewChatMessage(event.target.value)
+                }
+                maxLength={2000}
+                disabled={sendingMessage}
+                required
+              />
+
+              <button
+                type="submit"
+                className="uni-button"
+                disabled={sendingMessage || !newChatMessage.trim()}
+              >
+                <Send size={16} />
+                {sendingMessage ? 'Sending...' : 'Send'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Offer a ride */}
       <div className="uni-card" style={{ marginBottom: '24px' }}>
@@ -466,6 +1049,7 @@ export default function RidePooling() {
                 <label className="uni-label" htmlFor="ride-from">
                   Starting Point
                 </label>
+
                 <input
                   id="ride-from"
                   className="uni-input"
@@ -481,6 +1065,7 @@ export default function RidePooling() {
                 <label className="uni-label" htmlFor="ride-to">
                   Destination
                 </label>
+
                 <input
                   id="ride-to"
                   className="uni-input"
@@ -496,6 +1081,7 @@ export default function RidePooling() {
                 <label className="uni-label" htmlFor="ride-time">
                   Departure Time
                 </label>
+
                 <input
                   id="ride-time"
                   className="uni-input"
@@ -510,6 +1096,7 @@ export default function RidePooling() {
                 <label className="uni-label" htmlFor="ride-seats">
                   Available Seats
                 </label>
+
                 <select
                   id="ride-seats"
                   className="uni-input"
